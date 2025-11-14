@@ -2,352 +2,433 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Agora Agent Demo — Video Debug (Local)</title>
+  <title>Agora Agent Demo — Print Response + Live</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     body { font-family: Inter, system-ui, sans-serif; background:#071024; color:#dff0ff; padding:18px; }
-    .controls { display:flex; gap:8px; align-items:center; margin-bottom:12px; }
+    .controls { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
     input { padding:8px; border-radius:8px; border:1px solid #123; background:#081224; color:#dff0ff; }
     button { padding:8px 12px; border-radius:8px; border:none; background:#06b6d4; color:#022; cursor:pointer; }
-    #grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; height:56vh; }
-    .box { background:#000; border-radius:8px; overflow:hidden; position:relative; border:1px solid #102434; display:flex; align-items:center; justify-content:center; }
-    .label { position:absolute; left:8px; top:8px; background:#0009; padding:4px 8px; border-radius:6px; font-size:12px; color:#9fd6e6; z-index:2; }
-    #log { margin-top:12px; background:#051020; padding:10px; border-radius:8px; height:200px; overflow:auto; font-size:12px; color:#bfe6f7; border:1px solid #113244; white-space:pre-wrap; }
+    #grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; height:46vh; }
+    .box { background:#000; border-radius:8px; overflow:hidden; position:relative; border:1px solid #102434; padding:10px; box-sizing:border-box; }
+    .label { position:absolute; left:8px; top:8px; background:#0009; padding:4px 8px; border-radius:6px; font-size:12px; color:#9fd6e6; }
+    #log { margin-top:12px; background:#051020; padding:10px; border-radius:8px; height:160px; overflow:auto; font-size:12px; color:#bfe6f7; border:1px solid #113244; white-space:pre-wrap; }
     .small { font-size:13px; color:#9fbcd1; margin-left:12px; }
-    video, #local-player, #remote-player { width:100%; height:100%; object-fit:cover; background:#000; display:block; }
+    .transcript { font-size:14px; line-height:1.4; color:#dff0ff; background:linear-gradient(180deg,#021426, #031a2a); padding:8px; border-radius:6px; max-height:40vh; overflow:auto; }
+    .row { display:flex; gap:8px; align-items:center; }
+    .user-bubble, .ai-bubble { padding:8px 10px; border-radius:10px; margin-bottom:8px; max-width:90%; }
+    .user-bubble { background:#052b3a; color:#bfe6f7; align-self:flex-end; }
+    .ai-bubble { background:#0b2b18; color:#bff7d6; align-self:flex-start; }
+    .transcript-col { display:flex; flex-direction:column; gap:6px; }
+    audio { width:100%; margin-top:6px; }
     .status { font-size:12px; color:#9fbcd1; margin-left:8px; }
-    #grid .box .player-wrap { width:100%; height:100%; display:flex; align-items:center; justify-content:center; }
-    .hint { font-size:13px; color:#9fbcd1; margin-top:8px; }
+    video, #local-player, #remote-player { width:100%; height:100%; object-fit:cover; background:#000; display:block; }
+    .panel { height:160px; overflow:auto; background:#041522; border-radius:6px; padding:8px; border:1px solid #093244; font-size:13px; color:#cfeff7; white-space:pre-wrap; }
+    .controls-right { margin-left:auto; display:flex; gap:8px; align-items:center; }
+    .tiny { font-size:11px; color:#9fbcd1; }
+    .flex { display:flex; gap:12px; }
+    .col { display:flex; flex-direction:column; gap:8px; }
+    .muted { color:#80aab7; }
+    .btn-raw { background:#2b3b4a; color:#dff0ff; border-radius:6px; padding:6px 8px; border:1px solid #17303f; cursor:pointer; }
   </style>
 </head>
 <body>
-  <h2>Agora Conversational AI — Video Debug</h2>
+  <h2>Agora Agent Demo — Print Server & Agent Responses</h2>
 
   <div class="controls">
     <input id="channel" placeholder="channel name" value="test-room" />
     <button id="joinBtn">Join</button>
     <button id="leaveBtn" disabled>Leave</button>
     <div class="small">Backend: <strong>http://localhost:8000</strong></div>
-    <div class="status" id="permStatus">Camera: <em>unknown</em></div>
+    <div class="controls-right">
+      <div class="status" id="recStatus">STT: <em>stopped</em></div>
+      <button id="showRawBtn" class="btn-raw tiny">Toggle Full Raw Join JSON</button>
+    </div>
   </div>
 
   <div id="grid">
     <div class="box">
       <div class="label">Local</div>
-      <div class="player-wrap" id="local-wrap">
-        <!-- local player will be attached here -->
+      <div id="local-wrap" style="width:100%; height:100%; display:flex; align-items:center; justify-content:center;">
         <video id="local-player" autoplay muted playsinline></video>
       </div>
     </div>
+
     <div class="box">
       <div class="label">Remote / Agent</div>
-      <div class="player-wrap" id="remote-wrap">
-        <!-- remote player will be attached here -->
+      <div id="remote-wrap" style="width:100%; height:100%; display:flex; align-items:center; justify-content:center;">
         <video id="remote-player" autoplay playsinline></video>
       </div>
     </div>
   </div>
 
-  <div id="log"></div>
+  <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-top:12px;">
+    <div class="box col">
+      <div class="label" style="top:6px">Conversation</div>
+      <div class="transcript" id="conversation"></div>
+    </div>
+
+    <div class="box col">
+      <div class="label" style="top:6px">Responses & Logs</div>
+      <div style="display:flex; gap:8px;">
+        <div style="flex:1">
+          <div class="tiny muted">Raw join (truncated)</div>
+          <div id="rawJoin" class="panel">(no join yet)</div>
+        </div>
+        <div style="flex:1">
+          <div class="tiny muted">Parsed join payload</div>
+          <div id="parsedJoin" class="panel">{ }</div>
+        </div>
+      </div>
+      <div style="margin-top:8px;">
+        <div class="tiny muted">Event log (SSE & debug)</div>
+        <div id="log" class="panel"></div>
+      </div>
+    </div>
+  </div>
 
   <!-- Agora SDK -->
   <script src="https://download.agora.io/sdk/release/AgoraRTC_N.js"></script>
 
   <script>
-    // ---------- UI helpers ----------
+    // ---------- simple UI loggers ----------
+    const rawJoinEl = document.getElementById("rawJoin");
+    const parsedJoinEl = document.getElementById("parsedJoin");
     const LOG = document.getElementById("log");
-    const permStatus = document.getElementById("permStatus");
+    const CONV = document.getElementById("conversation");
+    const recStatus = document.getElementById("recStatus");
+    const showRawBtn = document.getElementById("showRawBtn");
+
     function uiLog(...args) {
       const t = new Date().toLocaleTimeString();
-      const msg = args.map(a => (typeof a === "object" ? JSON.stringify(a) : String(a))).join(" ");
-      LOG.textContent = `${t} — ${msg}\n\n` + LOG.textContent;
+      const text = args.map(a => (typeof a === "object" ? JSON.stringify(a, null, 2) : String(a))).join(" ");
+      LOG.textContent = `${t} — ${text}\n\n` + LOG.textContent;
       console.log(...args);
     }
 
-    function setPermStatus(s) {
-      permStatus.innerHTML = `Camera: <em>${s}</em>`;
+    function setRawJoin(raw) {
+      if (!raw) rawJoinEl.textContent = "(empty)";
+      else {
+        const display = raw.length > 800 ? raw.slice(0,800) + "\n\n...[truncated]" : raw;
+        rawJoinEl.textContent = display;
+        rawJoinEl.dataset.full = raw;
+      }
     }
 
-    // ---------- DOM refs ----------
-    const joinBtn = document.getElementById("joinBtn");
-    const leaveBtn = document.getElementById("leaveBtn");
-    const channelInput = document.getElementById("channel");
-    const localPlayer = document.getElementById("local-player");
-    const remotePlayer = document.getElementById("remote-player");
-    const localWrap = document.getElementById("local-wrap");
-    const remoteWrap = document.getElementById("remote-wrap");
+    function setParsedJoin(obj) {
+      parsedJoinEl.textContent = JSON.stringify(obj, null, 2);
+      parsedJoinEl.dataset.json = JSON.stringify(obj);
+    }
 
-    // ---------- Agora state ----------
+    showRawBtn.addEventListener("click", () => {
+      const full = rawJoinEl.dataset.full || "";
+      if (!full) return alert("No raw join response available yet.");
+      // open in new window for easier inspection
+      const w = window.open("", "_blank");
+      w.document.body.style.background = "#071024";
+      w.document.body.style.color = "#dff0ff";
+      const pre = w.document.createElement("pre");
+      pre.style.whiteSpace = "pre-wrap";
+      pre.textContent = full;
+      w.document.body.appendChild(pre);
+    });
+
+    // conversation UI
+    function appendUserText(txt) {
+      const div = document.createElement("div");
+      div.className = "user-bubble";
+      div.textContent = txt;
+      CONV.appendChild(div);
+      CONV.scrollTop = CONV.scrollHeight;
+    }
+    function appendAiText(txt, audioSrc = null) {
+      const wrapper = document.createElement("div");
+      wrapper.style.display = "flex";
+      wrapper.style.flexDirection = "column";
+      wrapper.style.alignItems = "flex-start";
+      const div = document.createElement("div");
+      div.className = "ai-bubble";
+      div.textContent = txt;
+      wrapper.appendChild(div);
+      if (audioSrc) {
+        try {
+          const a = document.createElement("audio");
+          a.controls = true;
+          a.src = audioSrc;
+          wrapper.appendChild(a);
+          a.play().catch(e => uiLog("Audio autoplay blocked:", e && e.message));
+        } catch (e) { uiLog("Failed to attach audio:", e); }
+      }
+      CONV.appendChild(wrapper);
+      CONV.scrollTop = CONV.scrollHeight;
+    }
+
+    // ---------- helpers: extract text/audio ----------
+    function extractTextFromPayload(obj) {
+      if (!obj) return null;
+      if (typeof obj === "string") return obj;
+      const candidates = ["message","text","reply","content","transcript","partial","delta","output"];
+      for (const c of candidates) {
+        if (obj[c]) {
+          if (typeof obj[c] === "string") return obj[c];
+          if (typeof obj[c] === "object" && obj[c].text) return obj[c].text;
+        }
+      }
+      if (Array.isArray(obj.events)) {
+        for (const ev of obj.events) {
+          const t = extractTextFromPayload(ev);
+          if (t) return t;
+        }
+      }
+      if (obj.response && obj.response.choices) {
+        for (const ch of obj.response.choices) {
+          if (ch.delta && ch.delta.content) return ch.delta.content;
+          if (ch.message && ch.message.content) return ch.message.content;
+        }
+      }
+      for (const k of Object.keys(obj)) {
+        if (typeof obj[k] === "string" && obj[k].length < 10000 && obj[k].split(" ").length > 0) {
+          if (!/^data:audio|^https?:\/\/.*\.(mp3|wav|ogg)/i.test(obj[k])) return obj[k];
+        }
+      }
+      return null;
+    }
+    function findAudioSrcInPayload(obj) {
+      if (!obj) return null;
+      const keys = ["audio","audio_base64","audio_b64","audio_url","tts_audio","audioUri"];
+      for (const k of keys) {
+        if (obj[k]) {
+          const v = obj[k];
+          if (typeof v === "string") {
+            if (/^[A-Za-z0-9+/=]+\s*$/.test(v) && v.length > 200) return `data:audio/mp3;base64,${v}`;
+            if (v.startsWith("data:audio/")) return v;
+            if (v.startsWith("http://") || v.startsWith("https://")) return v;
+          }
+        }
+      }
+      if (obj.properties) return findAudioSrcInPayload(obj.properties);
+      return null;
+    }
+
+    // ---------- EventSource handling ----------
+    let agentEventSource = null;
+    function openAgentEventSource(url) {
+      try {
+        if (agentEventSource) { try { agentEventSource.close(); } catch(e){} agentEventSource=null; }
+        uiLog("Opening EventSource:", url);
+        agentEventSource = new EventSource(url);
+        agentEventSource.onopen = () => uiLog("EventSource open:", url);
+        agentEventSource.onerror = (err) => uiLog("EventSource error:", err);
+        agentEventSource.onmessage = (ev) => {
+          let data = ev.data;
+          try { data = JSON.parse(ev.data); } catch(e) {}
+          uiLog("EventSource message (raw):", ev.data);
+          uiLog("EventSource message (parsed):", data);
+          // print to parsedJoin or log area as well
+          LOG_PRETTY_AND_CONSUME(data);
+        };
+        agentEventSource.addEventListener("ai", e => {
+          let d = e.data;
+          try { d = JSON.parse(e.data); } catch(_) {}
+          uiLog("EventSource [ai]:", d);
+          LOG_PRETTY_AND_CONSUME(d);
+        });
+      } catch (e) {
+        uiLog("Failed to open EventSource:", e);
+      }
+    }
+
+    function LOG_PRETTY_AND_CONSUME(data) {
+      // append pretty json to the parsed panel for quick inspection
+      try {
+        uiLog("SSE raw:", data);
+      } catch (e) {}
+      // display text/audio if any
+      const text = extractTextFromPayload(data);
+      const audio = findAudioSrcInPayload(data);
+      if (text) appendAiText(text, audio);
+    }
+
+    // ---------- SpeechRecognition (STT) ----------
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+    let recognizer = null;
+    let isRecognizing = false;
+    function initSpeechRecognition() {
+      if (!SpeechRecognition) { recStatus.innerHTML = 'STT: <em>unsupported</em>'; uiLog("SpeechRecognition unsupported"); return; }
+      if (recognizer) return;
+      recognizer = new SpeechRecognition();
+      recognizer.continuous = true;
+      recognizer.interimResults = true;
+      recognizer.lang = 'en-US';
+      recognizer.onstart = () => { isRecognizing=true; recStatus.innerHTML='STT: <em>listening</em>'; uiLog("SR started"); };
+      recognizer.onend = () => { isRecognizing=false; recStatus.innerHTML='STT: <em>stopped</em>'; uiLog("SR ended"); if (joinBtn.disabled) setTimeout(()=>{ try{ recognizer.start(); }catch(e){uiLog("SR restart failed",e);} },500); };
+      recognizer.onerror = (e) => uiLog("SR error:", e);
+      let lastFinal = "";
+      recognizer.onresult = (event) => {
+        let interim="";
+        for (let i=event.resultIndex;i<event.results.length;++i){
+          const res = event.results[i];
+          if (res.isFinal) {
+            const finalTranscript = res[0].transcript.trim();
+            appendUserText(finalTranscript);
+            uiLog("User (final):", finalTranscript);
+          } else {
+            interim += res[0].transcript;
+          }
+        }
+        if (interim) uiLog("User (interim):", interim);
+      };
+    }
+    function startRecognition(){ if (!SpeechRecognition) return; initSpeechRecognition(); try{ if (recognizer && !isRecognizing) recognizer.start(); }catch(e){ uiLog("SR start failed:", e); } }
+    function stopRecognition(){ if (!recognizer) return; try{ recognizer.stop(); }catch(e){ uiLog("SR stop failed:", e); } }
+
+    // ---------- Agora + Join flow ----------
     let client = null;
-    let localTracks = { audioTrack: null, videoTrack: null };
+    let localTracks = { audioTrack:null, videoTrack:null };
     const backend = "http://localhost:8000";
 
-    // ---------- device listing helper ----------
-    async function listDevices() {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
-        uiLog("enumerateDevices not supported in this browser");
-        return;
-      }
-      try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        uiLog("Available media devices:", devices);
-        return devices;
-      } catch (e) {
-        uiLog("Failed to enumerate devices:", e);
-      }
-    }
-
-    // ---------- fallback getUserMedia preview ----------
-    async function fallbackPreview() {
-      uiLog("Attempting fallback local preview using navigator.mediaDevices.getUserMedia()");
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        localPlayer.srcObject = stream;
-        localPlayer.muted = true;
-        await localPlayer.play().catch(e => uiLog("local video autoplay blocked:", e));
-        setPermStatus("granted (fallback)");
-        uiLog("Fallback preview active. Stream tracks:", stream.getTracks());
-      } catch (err) {
-        uiLog("getUserMedia fallback failed:", err && err.name ? `${err.name} — ${err.message}` : err);
-        setPermStatus(err && err.name ? err.name : "denied/unavailable");
-      }
-    }
-
-    // ---------- init Agora client ----------
     function initClient() {
       if (client) return;
       client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
-
       client.on("user-published", async (user, mediaType) => {
         uiLog("user-published:", user.uid, mediaType);
-        try {
-          await client.subscribe(user, mediaType);
-        } catch (e) {
-          uiLog("subscribe error:", e);
-          return;
-        }
-
+        await client.subscribe(user, mediaType);
         if (mediaType === "video") {
-          // prefer to play into the remote-player video element
-          try {
-            // create a container div to let Agora attach to existing element
-            // Agora SDK play accepts an element or element id
-            uiLog("Playing remote video into #remote-player (uid: " + user.uid + ")");
-            user.videoTrack.play(remotePlayer).catch(err => {
-              uiLog("remote video play failed:", err);
-              // try creating a new div and play there
-              const div = document.createElement("div");
-              div.style.width = "100%";
-              div.style.height = "100%";
-              remoteWrap.innerHTML = "";
-              remoteWrap.appendChild(div);
-              user.videoTrack.play(div).catch(e2 => uiLog("remote fallback play failed:", e2));
-            });
-          } catch (e) {
-            uiLog("Error while playing remote video:", e);
-          }
+          try { user.videoTrack.play(document.getElementById("remote-player")); }
+          catch(e){ uiLog("remote play failed:", e); const div=document.createElement("div"); div.style.width="100%"; div.style.height="100%"; document.getElementById("remote-wrap").innerHTML=""; document.getElementById("remote-wrap").appendChild(div); user.videoTrack.play(div).catch(e2=>uiLog("remote fallback failed",e2)); }
         }
-        if (mediaType === "audio") {
-          try {
-            user.audioTrack.play();
-          } catch (e) {
-            uiLog("Error playing remote audio:", e);
-          }
-        }
+        if (mediaType === "audio") try{ user.audioTrack.play(); }catch(e){uiLog("play remote audio failed",e);}
       });
-
-      client.on("user-unpublished", (user) => {
-        uiLog("user-unpublished:", user.uid);
-        // clear remote player
-        remoteWrap.innerHTML = '<video id="remote-player" autoplay playsinline></video>';
-      });
-
-      client.on("user-left", (user) => {
-        uiLog("user-left:", user.uid);
-      });
-
+      client.on("user-unpublished", user=> uiLog("user-unpublished", user.uid));
+      client.on("user-left", user => uiLog("user-left", user.uid));
       uiLog("Agora client initialized");
     }
 
-    // ---------- join flow with robust video preview ----------
-    async function join() {
-      const channel = channelInput.value.trim();
-      if (!channel) return alert("Enter a channel name");
+    async function safeFetchJoin(channel) {
+      try {
+        const res = await fetch(`${backend}/api/agent/join`, {
+          method: "POST", headers: { "Content-Type":"application/json" }, body: JSON.stringify({ channel })
+        });
+        const raw = await res.text();
+        setRawJoin(raw || "(empty)");
+        uiLog("raw join response status:", res.status);
+        uiLog(raw && raw.length>1000 ? raw.slice(0,1000)+"...[truncated]" : raw);
+        if (!res.ok) {
+          try { const parsed = raw ? JSON.parse(raw) : null; setParsedJoin(parsed || {}); uiLog("server error detail:", parsed); alert("Server error: " + (parsed?.detail || res.status)); }
+          catch(e) { alert("Server join error — non-json body. See logs."); }
+          return null;
+        }
+        let json=null;
+        try { json = raw ? JSON.parse(raw) : null; setParsedJoin(json || {}); } catch(e){ uiLog("join parse failed:", e); setParsedJoin({}); return null; }
+        // print full parsed to UI and console
+        uiLog("AI JOIN RESPONSE (parsed):", json);
+        console.log("AI JOIN RESPONSE (parsed):", json);
+        return json;
+      } catch (err) {
+        uiLog("Network/fetch error:", err);
+        alert("Network error: " + (err.message||err));
+        return null;
+      }
+    }
 
+    function attachAndLogAgentEventsFromPayload(payload) {
+      try {
+        if (!payload) return;
+        // print to panels
+        setParsedJoin(payload);
+        // if events array
+        if (Array.isArray(payload.events) && payload.events.length) {
+          uiLog("payload.events found — logging each event:");
+          payload.events.forEach((ev,i) => { uiLog(`events[${i}]`, ev); const text=extractTextFromPayload(ev); const audio=findAudioSrcInPayload(ev); if (text) appendAiText(text,audio); });
+        }
+        // try simple text
+        const t = extractTextFromPayload(payload);
+        const a = findAudioSrcInPayload(payload);
+        if (t) { uiLog("payload message/text:", t); appendAiText(t,a); }
+        // open SSE if present
+        const sseUrl = payload.sse_url || payload.stream_url || payload.sse || payload.stream || payload.ai_stream;
+        if (sseUrl && typeof EventSource !== "undefined") openAgentEventSource(sseUrl);
+      } catch (e) { uiLog("attach error:", e); }
+    }
+
+    async function join() {
+      const channel = document.getElementById("channel").value.trim();
+      if (!channel) return alert("Enter a channel name");
       joinBtn.disabled = true;
       try {
         initClient();
-
-        uiLog("Listing devices before join...");
-        await listDevices();
-
-        // Create local tracks with error handling
+        // create local tracks
         try {
-          uiLog("Creating microphone and camera tracks (AgoraRTC.createMicrophoneAndCameraTracks)...");
-          const [audioTrack, videoTrack] = await AgoraRTC.createMicrophoneAndCameraTracks();
-          localTracks.audioTrack = audioTrack;
-          localTracks.videoTrack = videoTrack;
-
-          // attach to local <video> element
-          try {
-            uiLog("Playing local camera into #local-player via Agora videoTrack.play()");
-            // Agora's play accepts element or id
-            await videoTrack.play(localPlayer);
-            // unmute localPlayer for preview? Keep muted to avoid echo
-            localPlayer.muted = true;
-            setPermStatus("granted");
-            uiLog("Local preview playing via Agora track");
-          } catch (playErr) {
-            uiLog("videoTrack.play(localPlayer) failed:", playErr);
-            // fallback: grab MediaStream from track and attach to video element
-            try {
-              const stream = new MediaStream([videoTrack.getMediaStreamTrack()]);
-              localPlayer.srcObject = stream;
-              await localPlayer.play().catch(e => uiLog("localPlayer.play fallback blocked:", e));
-              uiLog("Local preview playing via MediaStream fallback");
-            } catch (fallbackErr) {
-              uiLog("Fallback local preview creation failed:", fallbackErr);
-              // Try userMedia fallback
-              await fallbackPreview();
-            }
-          }
-        } catch (trackErr) {
-          uiLog("Agora createMicrophoneAndCameraTracks failed:", trackErr && (trackErr.name || trackErr.message) ? `${trackErr.name}: ${trackErr.message}` : trackErr);
-          // Try getUserMedia fallback to verify permissions/access
-          await fallbackPreview();
-          // continue join even if preview fallback used; still try to join the channel
+          const [mic, cam] = await AgoraRTC.createMicrophoneAndCameraTracks();
+          localTracks.audioTrack = mic; localTracks.videoTrack = cam;
+          try { await cam.play(document.getElementById("local-player")); document.getElementById("local-player").muted = true; } catch(e){ uiLog("local play failed:", e); }
+        } catch (e) {
+          uiLog("createMic+Cam failed:", e);
         }
 
-        // Call backend join to get Agora appId / token / channel etc.
-        uiLog("Requesting join from backend...");
-        const resp = await fetch(`${backend}/api/agent/join`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ channel })
-        });
+        const resp = await safeFetchJoin(channel);
+        if (!resp) { joinBtn.disabled=false; return; }
+        const payload = resp.data || resp;
+        setParsedJoin(payload);
+        attachAndLogAgentEventsFromPayload(payload);
 
-        const raw = await resp.text();
-        uiLog("join response status:", resp.status);
-        uiLog("join response (truncated):", raw && raw.length > 1000 ? raw.slice(0,1000)+"...[truncated]" : raw);
-
-        if (!resp.ok) {
-          try { const parsed = raw ? JSON.parse(raw) : null; uiLog("join error detail:", parsed); alert("Server error: " + (parsed?.detail || resp.status)); }
-          catch(e) { alert("Server join error. See console."); }
-          joinBtn.disabled = false;
-          return;
-        }
-
-        const json = raw ? JSON.parse(raw) : null;
-        uiLog("join payload:", json);
-
-        const payload = json.data || json;
+        // join Agora if appid present
         const appId = payload.appid || payload.app_id || payload.app || payload.appId || payload.properties?.appid || "";
         const token = payload.token || payload.rtcToken || payload.rtc_token || null;
         const channelName = payload.channel || channel;
+        if (!appId || appId === "MOCK_APPID") { uiLog("Mock appid — not joining RTC"); joinBtn.disabled=true; leaveBtn.disabled=false; startRecognition(); return; }
+        try { await client.join(appId, channelName, token || null, null); uiLog("Joined Agora RTC:", channelName); }
+        catch(e){ uiLog("client.join error:", e); alert("Agora join failed — see logs"); joinBtn.disabled=false; return; }
 
-        // If mock, skip real RTC join
-        if (!appId || appId === "MOCK_APPID") {
-          uiLog("Mock appid returned — staying in preview (mock)");
-          joinBtn.disabled = true;
-          leaveBtn.disabled = false;
-          return;
-        }
-
-        // Join and publish tracks (safe: may have localTracks set from createMicrophoneAndCameraTracks)
-        uiLog("Joining Agora RTC with appId, channel:", appId, channelName);
-        try {
-          await client.join(appId, channelName, token || null, null);
-        } catch (joinErr) {
-          uiLog("client.join failed:", joinErr);
-          alert("Agora join failed. Check console for details.");
-          joinBtn.disabled = false;
-          return;
-        }
-
-        uiLog("Joined channel successfully");
-
-        // If we have local tracks from Agora, publish them
+        // publish tracks if available
         try {
           const toPublish = [];
           if (localTracks.audioTrack) toPublish.push(localTracks.audioTrack);
           if (localTracks.videoTrack) toPublish.push(localTracks.videoTrack);
+          if (toPublish.length) { await client.publish(toPublish); uiLog("Published local tracks"); }
+        } catch (e){ uiLog("publish failed:", e); }
 
-          if (toPublish.length) {
-            await client.publish(toPublish);
-            uiLog("Published local tracks", toPublish.map(t => t.constructor.name || String(t)));
-          } else {
-            uiLog("No Agora local tracks to publish (maybe fallback preview used).");
-            // If we used fallback getUserMedia stream, we cannot publish it via Agora SDK in this code path.
-            // To publish you must create Agora tracks using SDK — ensure createMicrophoneAndCameraTracks succeeded earlier.
-          }
-        } catch (pubErr) {
-          uiLog("Failed to publish tracks:", pubErr);
-        }
-
-        joinBtn.disabled = true;
-        leaveBtn.disabled = false;
-
+        // start STT
+        startRecognition();
+        joinBtn.disabled=true; leaveBtn.disabled=false;
       } catch (err) {
-        uiLog("Unexpected join error:", err);
-        alert("Join error — see console");
-        joinBtn.disabled = false;
+        uiLog("Join flow error:", err);
+        alert("Join error — see logs");
+        joinBtn.disabled=false;
       }
     }
 
-    // ---------- leave ----------
     async function leave() {
       try {
-        // stop local players & tracks
-        try {
-          if (localTracks.audioTrack) { localTracks.audioTrack.stop(); localTracks.audioTrack.close(); }
-        } catch(e){}
-        try {
-          if (localTracks.videoTrack) { localTracks.videoTrack.stop(); localTracks.videoTrack.close(); }
-        } catch(e){}
-
-        // stop fallback video element stream if present
-        if (localPlayer && localPlayer.srcObject) {
-          const st = localPlayer.srcObject;
-          if (st.getTracks) {
-            st.getTracks().forEach(t => { try { t.stop(); } catch(e){} });
-          }
-          localPlayer.srcObject = null;
-        }
-
-        await client?.leave();
+        stopRecognition();
+        if (localTracks.audioTrack) { try{ localTracks.audioTrack.stop(); localTracks.audioTrack.close(); }catch(e){} }
+        if (localTracks.videoTrack) { try{ localTracks.videoTrack.stop(); localTracks.videoTrack.close(); }catch(e){} }
+        try { await client?.leave(); } catch(e){ uiLog("client.leave failed", e); }
         uiLog("Left channel");
-      } catch (err) {
-        uiLog("Leave error:", err);
-      } finally {
-        localWrap.innerHTML = '<video id="local-player" autoplay muted playsinline></video>';
-        remoteWrap.innerHTML = '<video id="remote-player" autoplay playsinline></video>';
-        // rebind player references
-        // (small timeout to allow DOM to update)
-        setTimeout(() => {
-          const lp = document.getElementById("local-player");
-          const rp = document.getElementById("remote-player");
-          if (lp) { lp.muted = true; }
-        }, 50);
-        joinBtn.disabled = false;
-        leaveBtn.disabled = true;
+      } catch (e) { uiLog("Leave error:", e); } finally {
+        joinBtn.disabled=false; leaveBtn.disabled=true;
+        if (agentEventSource) { try { agentEventSource.close(); } catch(e){} agentEventSource=null; uiLog("Closed EventSource"); }
       }
     }
 
-    // ---------- events ----------
-    joinBtn.addEventListener("click", join);
-    leaveBtn.addEventListener("click", leave);
+    // ---------- UI events ----------
+    const joinBtnEl = document.getElementById("joinBtn"); const leaveBtnEl = document.getElementById("leaveBtn");
+    joinBtnEl.addEventListener("click", join); leaveBtnEl.addEventListener("click", leave);
 
-    // quick device report on load
-    (async () => {
-      await listDevices();
-      // check basic permission by trying to get a short permission-only stream
+    // quick health + visibility
+    (async ()=> {
       try {
-        const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-        s.getTracks().forEach(t => t.stop());
-        setPermStatus("available");
+        const h = await fetch(`${backend}/health`).then(r=>r.json());
+        uiLog("Backend health:", h);
+      }catch(e){ uiLog("Health check failed:", e); }
+
+      // initial permission check
+      try {
+        await navigator.mediaDevices.getUserMedia({ video:true, audio:false });
+        recStatus.innerHTML = 'STT: <em>ready</em>';
       } catch (e) {
-        uiLog("Initial permission check failed (no camera access):", e && e.name ? `${e.name} — ${e.message}` : e);
-        setPermStatus(e && e.name ? e.name : "unavailable");
+        recStatus.innerHTML = 'STT: <em>no-perm</em>';
+        uiLog("Permission check:", e);
       }
     })();
   </script>
