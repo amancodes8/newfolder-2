@@ -1,0 +1,355 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Agora Agent Demo — Video Debug (Local)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: Inter, system-ui, sans-serif; background:#071024; color:#dff0ff; padding:18px; }
+    .controls { display:flex; gap:8px; align-items:center; margin-bottom:12px; }
+    input { padding:8px; border-radius:8px; border:1px solid #123; background:#081224; color:#dff0ff; }
+    button { padding:8px 12px; border-radius:8px; border:none; background:#06b6d4; color:#022; cursor:pointer; }
+    #grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; height:56vh; }
+    .box { background:#000; border-radius:8px; overflow:hidden; position:relative; border:1px solid #102434; display:flex; align-items:center; justify-content:center; }
+    .label { position:absolute; left:8px; top:8px; background:#0009; padding:4px 8px; border-radius:6px; font-size:12px; color:#9fd6e6; z-index:2; }
+    #log { margin-top:12px; background:#051020; padding:10px; border-radius:8px; height:200px; overflow:auto; font-size:12px; color:#bfe6f7; border:1px solid #113244; white-space:pre-wrap; }
+    .small { font-size:13px; color:#9fbcd1; margin-left:12px; }
+    video, #local-player, #remote-player { width:100%; height:100%; object-fit:cover; background:#000; display:block; }
+    .status { font-size:12px; color:#9fbcd1; margin-left:8px; }
+    #grid .box .player-wrap { width:100%; height:100%; display:flex; align-items:center; justify-content:center; }
+    .hint { font-size:13px; color:#9fbcd1; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <h2>Agora Conversational AI — Video Debug</h2>
+
+  <div class="controls">
+    <input id="channel" placeholder="channel name" value="test-room" />
+    <button id="joinBtn">Join</button>
+    <button id="leaveBtn" disabled>Leave</button>
+    <div class="small">Backend: <strong>http://localhost:8000</strong></div>
+    <div class="status" id="permStatus">Camera: <em>unknown</em></div>
+  </div>
+
+  <div id="grid">
+    <div class="box">
+      <div class="label">Local</div>
+      <div class="player-wrap" id="local-wrap">
+        <!-- local player will be attached here -->
+        <video id="local-player" autoplay muted playsinline></video>
+      </div>
+    </div>
+    <div class="box">
+      <div class="label">Remote / Agent</div>
+      <div class="player-wrap" id="remote-wrap">
+        <!-- remote player will be attached here -->
+        <video id="remote-player" autoplay playsinline></video>
+      </div>
+    </div>
+  </div>
+
+  <div id="log"></div>
+
+  <!-- Agora SDK -->
+  <script src="https://download.agora.io/sdk/release/AgoraRTC_N.js"></script>
+
+  <script>
+    // ---------- UI helpers ----------
+    const LOG = document.getElementById("log");
+    const permStatus = document.getElementById("permStatus");
+    function uiLog(...args) {
+      const t = new Date().toLocaleTimeString();
+      const msg = args.map(a => (typeof a === "object" ? JSON.stringify(a) : String(a))).join(" ");
+      LOG.textContent = `${t} — ${msg}\n\n` + LOG.textContent;
+      console.log(...args);
+    }
+
+    function setPermStatus(s) {
+      permStatus.innerHTML = `Camera: <em>${s}</em>`;
+    }
+
+    // ---------- DOM refs ----------
+    const joinBtn = document.getElementById("joinBtn");
+    const leaveBtn = document.getElementById("leaveBtn");
+    const channelInput = document.getElementById("channel");
+    const localPlayer = document.getElementById("local-player");
+    const remotePlayer = document.getElementById("remote-player");
+    const localWrap = document.getElementById("local-wrap");
+    const remoteWrap = document.getElementById("remote-wrap");
+
+    // ---------- Agora state ----------
+    let client = null;
+    let localTracks = { audioTrack: null, videoTrack: null };
+    const backend = "http://localhost:8000";
+
+    // ---------- device listing helper ----------
+    async function listDevices() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+        uiLog("enumerateDevices not supported in this browser");
+        return;
+      }
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        uiLog("Available media devices:", devices);
+        return devices;
+      } catch (e) {
+        uiLog("Failed to enumerate devices:", e);
+      }
+    }
+
+    // ---------- fallback getUserMedia preview ----------
+    async function fallbackPreview() {
+      uiLog("Attempting fallback local preview using navigator.mediaDevices.getUserMedia()");
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        localPlayer.srcObject = stream;
+        localPlayer.muted = true;
+        await localPlayer.play().catch(e => uiLog("local video autoplay blocked:", e));
+        setPermStatus("granted (fallback)");
+        uiLog("Fallback preview active. Stream tracks:", stream.getTracks());
+      } catch (err) {
+        uiLog("getUserMedia fallback failed:", err && err.name ? `${err.name} — ${err.message}` : err);
+        setPermStatus(err && err.name ? err.name : "denied/unavailable");
+      }
+    }
+
+    // ---------- init Agora client ----------
+    function initClient() {
+      if (client) return;
+      client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
+
+      client.on("user-published", async (user, mediaType) => {
+        uiLog("user-published:", user.uid, mediaType);
+        try {
+          await client.subscribe(user, mediaType);
+        } catch (e) {
+          uiLog("subscribe error:", e);
+          return;
+        }
+
+        if (mediaType === "video") {
+          // prefer to play into the remote-player video element
+          try {
+            // create a container div to let Agora attach to existing element
+            // Agora SDK play accepts an element or element id
+            uiLog("Playing remote video into #remote-player (uid: " + user.uid + ")");
+            user.videoTrack.play(remotePlayer).catch(err => {
+              uiLog("remote video play failed:", err);
+              // try creating a new div and play there
+              const div = document.createElement("div");
+              div.style.width = "100%";
+              div.style.height = "100%";
+              remoteWrap.innerHTML = "";
+              remoteWrap.appendChild(div);
+              user.videoTrack.play(div).catch(e2 => uiLog("remote fallback play failed:", e2));
+            });
+          } catch (e) {
+            uiLog("Error while playing remote video:", e);
+          }
+        }
+        if (mediaType === "audio") {
+          try {
+            user.audioTrack.play();
+          } catch (e) {
+            uiLog("Error playing remote audio:", e);
+          }
+        }
+      });
+
+      client.on("user-unpublished", (user) => {
+        uiLog("user-unpublished:", user.uid);
+        // clear remote player
+        remoteWrap.innerHTML = '<video id="remote-player" autoplay playsinline></video>';
+      });
+
+      client.on("user-left", (user) => {
+        uiLog("user-left:", user.uid);
+      });
+
+      uiLog("Agora client initialized");
+    }
+
+    // ---------- join flow with robust video preview ----------
+    async function join() {
+      const channel = channelInput.value.trim();
+      if (!channel) return alert("Enter a channel name");
+
+      joinBtn.disabled = true;
+      try {
+        initClient();
+
+        uiLog("Listing devices before join...");
+        await listDevices();
+
+        // Create local tracks with error handling
+        try {
+          uiLog("Creating microphone and camera tracks (AgoraRTC.createMicrophoneAndCameraTracks)...");
+          const [audioTrack, videoTrack] = await AgoraRTC.createMicrophoneAndCameraTracks();
+          localTracks.audioTrack = audioTrack;
+          localTracks.videoTrack = videoTrack;
+
+          // attach to local <video> element
+          try {
+            uiLog("Playing local camera into #local-player via Agora videoTrack.play()");
+            // Agora's play accepts element or id
+            await videoTrack.play(localPlayer);
+            // unmute localPlayer for preview? Keep muted to avoid echo
+            localPlayer.muted = true;
+            setPermStatus("granted");
+            uiLog("Local preview playing via Agora track");
+          } catch (playErr) {
+            uiLog("videoTrack.play(localPlayer) failed:", playErr);
+            // fallback: grab MediaStream from track and attach to video element
+            try {
+              const stream = new MediaStream([videoTrack.getMediaStreamTrack()]);
+              localPlayer.srcObject = stream;
+              await localPlayer.play().catch(e => uiLog("localPlayer.play fallback blocked:", e));
+              uiLog("Local preview playing via MediaStream fallback");
+            } catch (fallbackErr) {
+              uiLog("Fallback local preview creation failed:", fallbackErr);
+              // Try userMedia fallback
+              await fallbackPreview();
+            }
+          }
+        } catch (trackErr) {
+          uiLog("Agora createMicrophoneAndCameraTracks failed:", trackErr && (trackErr.name || trackErr.message) ? `${trackErr.name}: ${trackErr.message}` : trackErr);
+          // Try getUserMedia fallback to verify permissions/access
+          await fallbackPreview();
+          // continue join even if preview fallback used; still try to join the channel
+        }
+
+        // Call backend join to get Agora appId / token / channel etc.
+        uiLog("Requesting join from backend...");
+        const resp = await fetch(`${backend}/api/agent/join`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ channel })
+        });
+
+        const raw = await resp.text();
+        uiLog("join response status:", resp.status);
+        uiLog("join response (truncated):", raw && raw.length > 1000 ? raw.slice(0,1000)+"...[truncated]" : raw);
+
+        if (!resp.ok) {
+          try { const parsed = raw ? JSON.parse(raw) : null; uiLog("join error detail:", parsed); alert("Server error: " + (parsed?.detail || resp.status)); }
+          catch(e) { alert("Server join error. See console."); }
+          joinBtn.disabled = false;
+          return;
+        }
+
+        const json = raw ? JSON.parse(raw) : null;
+        uiLog("join payload:", json);
+
+        const payload = json.data || json;
+        const appId = payload.appid || payload.app_id || payload.app || payload.appId || payload.properties?.appid || "";
+        const token = payload.token || payload.rtcToken || payload.rtc_token || null;
+        const channelName = payload.channel || channel;
+
+        // If mock, skip real RTC join
+        if (!appId || appId === "MOCK_APPID") {
+          uiLog("Mock appid returned — staying in preview (mock)");
+          joinBtn.disabled = true;
+          leaveBtn.disabled = false;
+          return;
+        }
+
+        // Join and publish tracks (safe: may have localTracks set from createMicrophoneAndCameraTracks)
+        uiLog("Joining Agora RTC with appId, channel:", appId, channelName);
+        try {
+          await client.join(appId, channelName, token || null, null);
+        } catch (joinErr) {
+          uiLog("client.join failed:", joinErr);
+          alert("Agora join failed. Check console for details.");
+          joinBtn.disabled = false;
+          return;
+        }
+
+        uiLog("Joined channel successfully");
+
+        // If we have local tracks from Agora, publish them
+        try {
+          const toPublish = [];
+          if (localTracks.audioTrack) toPublish.push(localTracks.audioTrack);
+          if (localTracks.videoTrack) toPublish.push(localTracks.videoTrack);
+
+          if (toPublish.length) {
+            await client.publish(toPublish);
+            uiLog("Published local tracks", toPublish.map(t => t.constructor.name || String(t)));
+          } else {
+            uiLog("No Agora local tracks to publish (maybe fallback preview used).");
+            // If we used fallback getUserMedia stream, we cannot publish it via Agora SDK in this code path.
+            // To publish you must create Agora tracks using SDK — ensure createMicrophoneAndCameraTracks succeeded earlier.
+          }
+        } catch (pubErr) {
+          uiLog("Failed to publish tracks:", pubErr);
+        }
+
+        joinBtn.disabled = true;
+        leaveBtn.disabled = false;
+
+      } catch (err) {
+        uiLog("Unexpected join error:", err);
+        alert("Join error — see console");
+        joinBtn.disabled = false;
+      }
+    }
+
+    // ---------- leave ----------
+    async function leave() {
+      try {
+        // stop local players & tracks
+        try {
+          if (localTracks.audioTrack) { localTracks.audioTrack.stop(); localTracks.audioTrack.close(); }
+        } catch(e){}
+        try {
+          if (localTracks.videoTrack) { localTracks.videoTrack.stop(); localTracks.videoTrack.close(); }
+        } catch(e){}
+
+        // stop fallback video element stream if present
+        if (localPlayer && localPlayer.srcObject) {
+          const st = localPlayer.srcObject;
+          if (st.getTracks) {
+            st.getTracks().forEach(t => { try { t.stop(); } catch(e){} });
+          }
+          localPlayer.srcObject = null;
+        }
+
+        await client?.leave();
+        uiLog("Left channel");
+      } catch (err) {
+        uiLog("Leave error:", err);
+      } finally {
+        localWrap.innerHTML = '<video id="local-player" autoplay muted playsinline></video>';
+        remoteWrap.innerHTML = '<video id="remote-player" autoplay playsinline></video>';
+        // rebind player references
+        // (small timeout to allow DOM to update)
+        setTimeout(() => {
+          const lp = document.getElementById("local-player");
+          const rp = document.getElementById("remote-player");
+          if (lp) { lp.muted = true; }
+        }, 50);
+        joinBtn.disabled = false;
+        leaveBtn.disabled = true;
+      }
+    }
+
+    // ---------- events ----------
+    joinBtn.addEventListener("click", join);
+    leaveBtn.addEventListener("click", leave);
+
+    // quick device report on load
+    (async () => {
+      await listDevices();
+      // check basic permission by trying to get a short permission-only stream
+      try {
+        const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        s.getTracks().forEach(t => t.stop());
+        setPermStatus("available");
+      } catch (e) {
+        uiLog("Initial permission check failed (no camera access):", e && e.name ? `${e.name} — ${e.message}` : e);
+        setPermStatus(e && e.name ? e.name : "unavailable");
+      }
+    })();
+  </script>
+</body>
+</html>
