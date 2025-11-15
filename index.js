@@ -1,4 +1,4 @@
-// index.js — Agora Conversational AI join (fixed: action:start + rtc/media) + SSE proxy/logger
+// index.js — Agora Conversational AI join (with HeyGen avatar) + SSE proxy/logger
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
@@ -126,6 +126,9 @@ app.get("/api/agent/stream-proxy", async (req, res) => {
   }
 
   console.log("[proxy] proxying upstream SSE:", upstream);
+  // Ensure CORS headers so browser EventSource to this endpoint works
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "*");
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
@@ -179,6 +182,30 @@ app.get("/api/agent/stream-proxy", async (req, res) => {
 app.get("/health", (req, res) => {
   res.json({ ok: true, ts: Date.now() });
 });
+
+/* ---------- helper: extract possible stream URLs from Agora join response ---------- */
+function collectStreamUrlsFromResponse(obj) {
+  const urls = [];
+  if (!obj || typeof obj !== "object") return urls;
+  const keys = ["sse_url","stream_url","ai_stream","stream","sse","websocket_url","wss","url"];
+  for (const k of keys) {
+    if (obj[k] && typeof obj[k] === "string" && obj[k].startsWith("http")) urls.push({ url: obj[k], note: k });
+  }
+  // nested properties
+  if (obj.properties && obj.properties.stream_url) urls.push({ url: obj.properties.stream_url, note: "properties.stream_url" });
+  if (obj.data && obj.data.sse_url) urls.push({ url: obj.data.sse_url, note: "data.sse_url" });
+  // scan deeply for any http(s) strings (best-effort)
+  try {
+    const s = JSON.stringify(obj);
+    const re = /https?:\/\/[^\s"']{20,300}/g;
+    let m;
+    while ((m = re.exec(s)) !== null) {
+      const u = m[0];
+      if (!urls.some(x => x.url === u)) urls.push({ url: u, note: "deep-scan" });
+    }
+  } catch (e) {}
+  return urls;
+}
 
 /* ---------- main join endpoint (FIXED: includes action:start + rtc/media) ---------- */
 app.post("/api/agent/join", async (req, res) => {
@@ -268,7 +295,7 @@ app.post("/api/agent/join", async (req, res) => {
 
     /* ----------- CRITICAL: include action:"start" and request RTC/Media/TTS ----------- */
     const payload = {
-      action: "start", // <<< IMPORTANT: ensures Agora returns join details (appid, token, stream urls)
+      action: "start",
       name,
       properties: {
         channel,
@@ -297,18 +324,14 @@ app.post("/api/agent/join", async (req, res) => {
         vendor: "heygen",
         config: {
           apiKey: HEYGEN_API_KEY,
-          // avatarId is optional — HeyGen account must have a chosen avatar or template
           avatarId: HEYGEN_AVATAR_ID || undefined,
-          quality: HEYGEN_QUALITY, // low / medium / high
+          quality: HEYGEN_QUALITY,
           style: HEYGEN_STYLE,
         },
       };
 
-      // Ensure advanced feature flag for avatar is present
       payload.properties.advanced_features = payload.properties.advanced_features || {};
       payload.properties.advanced_features.enable_aivad = true;
-
-      // Make a best-effort addition: add hint to properties about required sample rate
       payload.properties.hints = payload.properties.hints || {};
       payload.properties.hints.required_audio_sample_rate = 24000;
     }
@@ -344,22 +367,9 @@ app.post("/api/agent/join", async (req, res) => {
     // If response contains stream urls, start server-side logging
     try {
       const responseData = r && r.data ? r.data : null;
-      const possibleStreamUrls = [];
-
-      if (responseData && typeof responseData === "object") {
-        ["sse_url", "stream_url", "ai_stream", "stream", "sse", "websocket_url", "wss"].forEach((k) => {
-          if (responseData[k]) possibleStreamUrls.push({ url: responseData[k], note: k });
-        });
-        if (responseData.properties && responseData.properties.stream_url) {
-          possibleStreamUrls.push({ url: responseData.properties.stream_url, note: "properties.stream_url" });
-        }
-        if (responseData.data && responseData.data.sse_url) {
-          possibleStreamUrls.push({ url: responseData.data.sse_url, note: "data.sse_url" });
-        }
-      }
-
+      const streamCandidates = collectStreamUrlsFromResponse(responseData);
       const unique = [];
-      for (const o of possibleStreamUrls) {
+      for (const o of streamCandidates) {
         if (!o || !o.url) continue;
         const u = String(o.url);
         if (!unique.some((x) => x.url === u)) unique.push({ url: u, note: o.note || "agent-stream" });
@@ -393,6 +403,62 @@ app.post("/api/agent/join", async (req, res) => {
   }
 });
 
+/* ---------- convenience endpoint: simplified join for frontend ---------- */
+/*
+  POST /api/agent/join-simple
+  body: { channel: "test-room", name?: "web-..." }
+  returns: { ok, appid, channel, token, agent_rtc_uid, stream_url, sse_url, raw }
+*/
+app.post("/api/agent/join-simple", async (req, res) => {
+  try {
+    const joinRespRaw = await (async () => {
+      // call the /api/agent/join route internally to reuse logic and keep outputs identical
+      // We'll do a local fetch to /api/agent/join
+      const backendUrl = `http://localhost:${PORT}/api/agent/join`;
+      try {
+        const r = await axios.post(backendUrl, req.body || {}, { timeout: 30000, validateStatus: null });
+        return { status: r.status, data: r.data };
+      } catch (e) {
+        return { status: 502, data: { error: "local_join_call_failed", detail: e?.message || String(e) } };
+      }
+    })();
+
+    if (!joinRespRaw || !joinRespRaw.data) return res.status(500).json({ error: "no_join_response" });
+
+    const rawData = joinRespRaw.data.data || joinRespRaw.data || {};
+    // collect useful fields
+    const appid = rawData.appid || rawData.app_id || rawData.app || rawData.properties?.appid || null;
+    const channel = rawData.channel || req.body.channel || rawData.properties?.channel || null;
+    const token = rawData.token || rawData.rtcToken || rawData.rtc_token || null;
+    const agent_rtc_uid = rawData.agent_rtc_uid || rawData.agentUid || rawData.agent_uid || rawData.properties?.agent_rtc_uid || null;
+
+    // collect stream urls
+    const streams = collectStreamUrlsFromResponse(rawData);
+    const stream_url = streams.find(s => s.note === "stream_url")?.url || streams.find(s => s.note === "deep-scan")?.url || null;
+    const sse_url = streams.find(s => s.note === "sse_url")?.url || streams.find(s => s.note === "data.sse_url")?.url || null;
+
+    // start server-side logging for convenience (if present)
+    if (stream_url) streamAndLogSSE(stream_url, "stream_url");
+    if (sse_url) streamAndLogSSE(sse_url, "sse_url");
+
+    const redactedRaw = redact(rawData);
+
+    return res.json({
+      ok: true,
+      appid,
+      channel,
+      token,
+      agent_rtc_uid,
+      stream_url: stream_url || null,
+      sse_url: sse_url || null,
+      raw: redactedRaw,
+    });
+  } catch (e) {
+    console.error("[join-simple] error:", e);
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
 /* ---------- optional client log endpoint ---------- */
 app.post("/api/client/log", (req, res) => {
   try {
@@ -406,4 +472,5 @@ app.post("/api/client/log", (req, res) => {
 /* ---------- start server ---------- */
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT} (pid ${process.pid})`);
+  console.log(`Call POST http://localhost:${PORT}/api/agent/join-simple with { channel: "test-room" }`);
 });

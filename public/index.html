@@ -57,7 +57,8 @@
     <div class="box">
       <div class="label">Remote / Agent</div>
       <div id="remote-wrap" style="width:100%; height:100%; display:flex; align-items:center; justify-content:center;">
-        <video id="remote-player" autoplay playsinline></video>
+        <!-- remote-player remains as fallback; the SDK will play into dynamic container -->
+        <video id="remote-player" autoplay playsinline muted></video>
       </div>
     </div>
   </div>
@@ -91,7 +92,7 @@
   <script src="https://download.agora.io/sdk/release/AgoraRTC_N.js"></script>
 
   <script>
-    // ---------- simple UI loggers ----------
+    // ---------- UI elements ----------
     const rawJoinEl = document.getElementById("rawJoin");
     const parsedJoinEl = document.getElementById("parsedJoin");
     const LOG = document.getElementById("log");
@@ -123,7 +124,6 @@
     showRawBtn.addEventListener("click", () => {
       const full = rawJoinEl.dataset.full || "";
       if (!full) return alert("No raw join response available yet.");
-      // open in new window for easier inspection
       const w = window.open("", "_blank");
       w.document.body.style.background = "#071024";
       w.document.body.style.color = "#dff0ff";
@@ -163,7 +163,7 @@
       CONV.scrollTop = CONV.scrollHeight;
     }
 
-    // ---------- helpers: extract text/audio ----------
+    // ---------- helpers ----------
     function extractTextFromPayload(obj) {
       if (!obj) return null;
       if (typeof obj === "string") return obj;
@@ -210,21 +210,24 @@
       return null;
     }
 
-    // ---------- EventSource handling ----------
+    // ---------- EventSource handling (proxy) ----------
     let agentEventSource = null;
+    const backend = "http://localhost:8000";
+
     function openAgentEventSource(url) {
       try {
+        if (!url) return uiLog("no sse url to open");
+        const proxySrc = btoa(url);
+        const proxyUrl = `${backend}/api/agent/stream-proxy?src=${proxySrc}`;
         if (agentEventSource) { try { agentEventSource.close(); } catch(e){} agentEventSource=null; }
-        uiLog("Opening EventSource:", url);
-        agentEventSource = new EventSource(url);
-        agentEventSource.onopen = () => uiLog("EventSource open:", url);
+        uiLog("Opening proxied EventSource:", proxyUrl);
+        agentEventSource = new EventSource(proxyUrl);
+        agentEventSource.onopen = () => uiLog("EventSource open (proxy):", proxyUrl);
         agentEventSource.onerror = (err) => uiLog("EventSource error:", err);
         agentEventSource.onmessage = (ev) => {
           let data = ev.data;
           try { data = JSON.parse(ev.data); } catch(e) {}
           uiLog("EventSource message (raw):", ev.data);
-          uiLog("EventSource message (parsed):", data);
-          // print to parsedJoin or log area as well
           LOG_PRETTY_AND_CONSUME(data);
         };
         agentEventSource.addEventListener("ai", e => {
@@ -239,11 +242,7 @@
     }
 
     function LOG_PRETTY_AND_CONSUME(data) {
-      // append pretty json to the parsed panel for quick inspection
-      try {
-        uiLog("SSE raw:", data);
-      } catch (e) {}
-      // display text/audio if any
+      try { uiLog("SSE raw:", data); } catch (e) {}
       const text = extractTextFromPayload(data);
       const audio = findAudioSrcInPayload(data);
       if (text) appendAiText(text, audio);
@@ -263,7 +262,6 @@
       recognizer.onstart = () => { isRecognizing=true; recStatus.innerHTML='STT: <em>listening</em>'; uiLog("SR started"); };
       recognizer.onend = () => { isRecognizing=false; recStatus.innerHTML='STT: <em>stopped</em>'; uiLog("SR ended"); if (joinBtn.disabled) setTimeout(()=>{ try{ recognizer.start(); }catch(e){uiLog("SR restart failed",e);} },500); };
       recognizer.onerror = (e) => uiLog("SR error:", e);
-      let lastFinal = "";
       recognizer.onresult = (event) => {
         let interim="";
         for (let i=event.resultIndex;i<event.results.length;++i){
@@ -285,21 +283,52 @@
     // ---------- Agora + Join flow ----------
     let client = null;
     let localTracks = { audioTrack:null, videoTrack:null };
-    const backend = "http://localhost:8000";
 
     function initClient() {
       if (client) return;
       client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
+
+      // Robust user-published handler
       client.on("user-published", async (user, mediaType) => {
         uiLog("user-published:", user.uid, mediaType);
-        await client.subscribe(user, mediaType);
-        if (mediaType === "video") {
-          try { user.videoTrack.play(document.getElementById("remote-player")); }
-          catch(e){ uiLog("remote play failed:", e); const div=document.createElement("div"); div.style.width="100%"; div.style.height="100%"; document.getElementById("remote-wrap").innerHTML=""; document.getElementById("remote-wrap").appendChild(div); user.videoTrack.play(div).catch(e2=>uiLog("remote fallback failed",e2)); }
+        try {
+          await client.subscribe(user, mediaType);
+          uiLog("subscribed to", user.uid, mediaType);
+        } catch (e) {
+          uiLog("subscribe error for", user.uid, e);
+          return;
         }
-        if (mediaType === "audio") try{ user.audioTrack.play(); }catch(e){uiLog("play remote audio failed",e);}
+
+        if (mediaType === "video") {
+          try {
+            const wrap = document.getElementById("remote-wrap");
+            wrap.innerHTML = ""; // clear previous
+            const container = document.createElement("div");
+            container.id = `player-${user.uid}`;
+            container.style.width = "100%";
+            container.style.height = "100%";
+            wrap.appendChild(container);
+            await user.videoTrack.play(container);
+            uiLog("remote video playing for", user.uid);
+          } catch (err) {
+            uiLog("remote video play failed:", err);
+            // fallback: try playing into the <video id="remote-player"> element as last resort
+            try {
+              const fallbackVideo = document.getElementById("remote-player");
+              if (user.videoTrack && user.videoTrack.getMediaStream) {
+                fallbackVideo.srcObject = user.videoTrack.getMediaStream();
+                fallbackVideo.play().catch(e=>uiLog("fallback video play failed:", e));
+              }
+            } catch (e2) { uiLog("fallback attach failed:", e2); }
+          }
+        }
+
+        if (mediaType === "audio") {
+          try { await user.audioTrack.play(); uiLog("remote audio playing"); } catch(e){ uiLog("play remote audio failed", e); }
+        }
       });
-      client.on("user-unpublished", user=> uiLog("user-unpublished", user.uid));
+
+      client.on("user-unpublished", user => uiLog("user-unpublished", user.uid));
       client.on("user-left", user => uiLog("user-left", user.uid));
       uiLog("Agora client initialized");
     }
@@ -320,7 +349,6 @@
         }
         let json=null;
         try { json = raw ? JSON.parse(raw) : null; setParsedJoin(json || {}); } catch(e){ uiLog("join parse failed:", e); setParsedJoin({}); return null; }
-        // print full parsed to UI and console
         uiLog("AI JOIN RESPONSE (parsed):", json);
         console.log("AI JOIN RESPONSE (parsed):", json);
         return json;
@@ -334,19 +362,20 @@
     function attachAndLogAgentEventsFromPayload(payload) {
       try {
         if (!payload) return;
-        // print to panels
         setParsedJoin(payload);
-        // if events array
+        // show text/audio from any immediate events
         if (Array.isArray(payload.events) && payload.events.length) {
           uiLog("payload.events found — logging each event:");
           payload.events.forEach((ev,i) => { uiLog(`events[${i}]`, ev); const text=extractTextFromPayload(ev); const audio=findAudioSrcInPayload(ev); if (text) appendAiText(text,audio); });
         }
-        // try simple text
         const t = extractTextFromPayload(payload);
         const a = findAudioSrcInPayload(payload);
         if (t) { uiLog("payload message/text:", t); appendAiText(t,a); }
-        // open SSE if present
-        const sseUrl = payload.sse_url || payload.stream_url || payload.sse || payload.stream || payload.ai_stream;
+
+        // open SSE via proxy if present
+        const sseUrl = payload.sse_url || payload.stream_url || payload.sse || payload.stream || payload.ai_stream ||
+                       (payload.data && (payload.data.sse_url || payload.data.stream_url)) ||
+                       (payload.properties && (payload.properties.sse_url || payload.properties.stream_url));
         if (sseUrl && typeof EventSource !== "undefined") openAgentEventSource(sseUrl);
       } catch (e) { uiLog("attach error:", e); }
     }
@@ -380,7 +409,30 @@
         try { await client.join(appId, channelName, token || null, null); uiLog("Joined Agora RTC:", channelName); }
         catch(e){ uiLog("client.join error:", e); alert("Agora join failed — see logs"); joinBtn.disabled=false; return; }
 
-        // publish tracks if available
+        // Immediately check for already-published remote users (agent may have published before we joined)
+        try {
+          const agentUid = String((payload && (payload.agent_rtc_uid || payload.agentUid || payload.agent_uid)) || "");
+          const remUsers = client.remoteUsers || {};
+          const remKeys = Object.keys(remUsers);
+          uiLog("Existing remote users on join:", remKeys);
+          if (agentUid && remUsers[agentUid]) {
+            uiLog("Agent user already present — subscribing to agent uid:", agentUid);
+            const remoteUser = remUsers[agentUid];
+            if (remoteUser.videoTrack) {
+              try { remoteUser.videoTrack.play(document.getElementById("remote-player")); uiLog("played existing remote video"); }
+              catch(e){ uiLog("play existing remote video failed:", e); }
+            }
+            if (remoteUser.audioTrack) {
+              try { remoteUser.audioTrack.play(); uiLog("played existing remote audio"); } catch(e){ uiLog("existing remote audio play failed", e); }
+            }
+          } else {
+            uiLog("Agent user not present yet or agentUid unknown — will wait for user-published events.");
+          }
+        } catch (e) {
+          uiLog("subscribe-existing-remote error:", e);
+        }
+
+        // publish local tracks if available
         try {
           const toPublish = [];
           if (localTracks.audioTrack) toPublish.push(localTracks.audioTrack);
@@ -422,7 +474,7 @@
         uiLog("Backend health:", h);
       }catch(e){ uiLog("Health check failed:", e); }
 
-      // initial permission check
+      // initial permission check (video)
       try {
         await navigator.mediaDevices.getUserMedia({ video:true, audio:false });
         recStatus.innerHTML = 'STT: <em>ready</em>';
